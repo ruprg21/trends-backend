@@ -24,13 +24,18 @@ def get_trends(keyword: str):
             iot[keyword].tolist() if not iot.empty else [0] * 12
         )
 
-        # Downsample weekly -> 12 monthly buckets
-        if len(interest) > 12:
+        # Downsample to 12 buckets safely
+        if len(interest) == 0:
+            interest = [0] * 12
+        elif len(interest) > 12:
             chunk = len(interest) // 12
             interest = [
-                int(sum(interest[i*chunk:(i+1)*chunk]) / chunk)
+                int(sum(interest[i*chunk:(i+1)*chunk]) / max(chunk, 1))
                 for i in range(12)
             ]
+        elif len(interest) < 12:
+            # Pad with zeros if too short
+            interest += [0] * (12 - len(interest))
 
         # Related queries
         pt.build_payload([keyword], timeframe="today 12-m")
@@ -54,7 +59,7 @@ def get_trends(keyword: str):
             top_topics = t_data["top"]["topic_title"].tolist()[:6]
 
         # Peak month
-        peak_idx = interest.index(max(interest)) if interest else 0
+        peak_idx = interest.index(max(interest)) if any(interest) else 0
         months = ["Jan","Feb","Mar","Apr","May","Jun",
                   "Jul","Aug","Sep","Oct","Nov","Dec"]
         peak_month = months[peak_idx % 12]
