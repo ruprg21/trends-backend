@@ -23,16 +23,30 @@ def get_cached(keyword):
 def set_cached(keyword, data):
     cache[keyword.lower().strip()] = (data, datetime.now())
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET"],
-    allow_headers=["*"],
-)
+def safe_list(val, fallback=[]):
+    try:
+        if val is None or not isinstance(val, pd.DataFrame) or val.empty:
+            return fallback
+        return val.iloc[:, 0].tolist()
+    except:
+        return fallback
+
+def to_12_months(lst):
+    """Safely convert any length list to exactly 12 values."""
+    if not lst:
+        return [0] * 12
+    if len(lst) >= 12:
+        chunk = len(lst) // 12
+        result = []
+        for i in range(12):
+            slice_ = lst[i * chunk: (i + 1) * chunk]
+            result.append(int(sum(slice_) / len(slice_)) if slice_ else 0)
+        return result
+    # pad with zeros if shorter than 12
+    return lst + [0] * (12 - len(lst))
 
 @app.get("/trends")
 def get_trends(keyword: str):
-    # Return cached result if available
     cached = get_cached(keyword)
     if cached:
         return cached
@@ -45,62 +59,64 @@ def get_trends(keyword: str):
             retries=3,
             backoff_factor=0.5,
         )
-        time.sleep(random.uniform(1.5, 3.0))  # polite delay
+        time.sleep(random.uniform(1.5, 3.0))
 
-        # Interest over time (last 12 months)
+        # --- Interest over time ---
         pt.build_payload([keyword], timeframe="today 12-m")
         iot = pt.interest_over_time()
-        interest = (
-            iot[keyword].tolist() if not iot.empty else [0] * 12
-        )
+        time.sleep(random.uniform(1.0, 2.0))
 
-        # Downsample to 12 buckets safely
-        if len(interest) == 0:
-            interest = [0] * 12
-        elif len(interest) > 12:
-            chunk = len(interest) // 12
-            interest = [
-                int(sum(interest[i*chunk:(i+1)*chunk]) / max(chunk, 1))
-                for i in range(12)
-            ]
-        elif len(interest) < 12:
-            # Pad with zeros if too short
-            interest += [0] * (12 - len(interest))
+        if not iot.empty and keyword in iot.columns:
+            raw = iot[keyword].tolist()
+        else:
+            raw = []
 
-        # Related queries
+        interest = to_12_months(raw)
+
+        # --- Related queries ---
         pt.build_payload([keyword], timeframe="today 12-m")
         related = pt.related_queries()
-        kw_data = related.get(keyword, {})
+        time.sleep(random.uniform(1.0, 2.0))
 
-        def extract(df):
-            if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        kw_data = related.get(keyword, {}) or {}
+
+        def extract_queries(df):
+            try:
+                if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+                    return []
+                return df["query"].dropna().tolist()
+            except:
                 return []
-            return df["query"].tolist()
 
-        rising = extract(kw_data.get("rising"))
-        top    = extract(kw_data.get("top"))
+        rising = extract_queries(kw_data.get("rising"))
+        top    = extract_queries(kw_data.get("top"))
 
-        # Related topics
+        # --- Related topics ---
         pt.build_payload([keyword], timeframe="today 12-m")
         topics = pt.related_topics()
-        t_data = topics.get(keyword, {})
-        top_topics = []
-        if isinstance(t_data.get("top"), pd.DataFrame):
-            top_topics = t_data["top"]["topic_title"].tolist()[:6]
+        time.sleep(random.uniform(1.0, 2.0))
 
-        # Peak month
-        peak_idx = interest.index(max(interest)) if any(interest) else 0
+        t_data = topics.get(keyword, {}) or {}
+        top_topics = []
+        try:
+            if isinstance(t_data.get("top"), pd.DataFrame) and not t_data["top"].empty:
+                top_topics = t_data["top"]["topic_title"].dropna().tolist()[:6]
+        except:
+            top_topics = []
+
+        # --- Peak month ---
         months = ["Jan","Feb","Mar","Apr","May","Jun",
                   "Jul","Aug","Sep","Oct","Nov","Dec"]
-        peak_month = months[peak_idx % 12]
+        peak_idx = interest.index(max(interest)) if any(interest) else 0
+        peak_month = months[min(peak_idx, 11)]
 
-        # Simple YoY trend
-        if len(interest) >= 12:
+        # --- YoY trend ---
+        try:
             first_half  = sum(interest[:6]) / 6 or 1
             second_half = sum(interest[6:]) / 6
             yoy = round(((second_half - first_half) / first_half) * 100)
             trend_str = f"+{yoy}% vs last year" if yoy >= 0 else f"{yoy}% vs last year"
-        else:
+        except:
             trend_str = "N/A"
 
         result = {
