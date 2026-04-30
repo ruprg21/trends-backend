@@ -4,8 +4,24 @@ from pytrends.request import TrendReq
 import pandas as pd
 import time
 import random
+from datetime import datetime, timedelta
 
 app = FastAPI()
+
+# --- Simple in-memory cache ---
+cache = {}
+CACHE_TTL = timedelta(hours=24)
+
+def get_cached(keyword):
+    key = keyword.lower().strip()
+    if key in cache:
+        data, timestamp = cache[key]
+        if datetime.now() - timestamp < CACHE_TTL:
+            return data
+    return None
+
+def set_cached(keyword, data):
+    cache[keyword.lower().strip()] = (data, datetime.now())
 
 app.add_middleware(
     CORSMiddleware,
@@ -16,6 +32,11 @@ app.add_middleware(
 
 @app.get("/trends")
 def get_trends(keyword: str):
+    # Return cached result if available
+    cached = get_cached(keyword)
+    if cached:
+        return cached
+
     try:
         pt = TrendReq(
             hl="en-US",
@@ -82,7 +103,7 @@ def get_trends(keyword: str):
         else:
             trend_str = "N/A"
 
-        return {
+        result = {
             "interest":     interest,
             "searchVolume": "Live data (relative scale 0–100)",
             "trend":        trend_str,
@@ -91,6 +112,9 @@ def get_trends(keyword: str):
             "rising":       rising[:4],
             "trendingNow":  top[:4],
         }
+
+        set_cached(keyword, result)
+        return result
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
