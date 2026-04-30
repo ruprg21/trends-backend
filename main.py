@@ -2,6 +2,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pytrends.request import TrendReq
 import pandas as pd
+import time
+import random
 
 app = FastAPI()
 
@@ -15,7 +17,14 @@ app.add_middleware(
 @app.get("/trends")
 def get_trends(keyword: str):
     try:
-        pt = TrendReq(hl="en-US", tz=360)
+        pt = TrendReq(
+            hl="en-US",
+            tz=360,
+            timeout=(10, 25),
+            retries=3,
+            backoff_factor=0.5,
+        )
+        time.sleep(random.uniform(1.5, 3.0))  # polite delay
 
         # Interest over time (last 12 months)
         pt.build_payload([keyword], timeframe="today 12-m")
