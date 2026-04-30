@@ -1,14 +1,19 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pytrends.request import TrendReq
-import pandas as pd
-import time
-import random
+import httpx
+import os
 from datetime import datetime, timedelta
 
 app = FastAPI()
 
-# --- Simple in-memory cache ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
+
+# --- Cache ---
 cache = {}
 CACHE_TTL = timedelta(hours=24)
 
@@ -23,116 +28,87 @@ def get_cached(keyword):
 def set_cached(keyword, data):
     cache[keyword.lower().strip()] = (data, datetime.now())
 
-def safe_list(val, fallback=[]):
-    try:
-        if val is None or not isinstance(val, pd.DataFrame) or val.empty:
-            return fallback
-        return val.iloc[:, 0].tolist()
-    except:
-        return fallback
+SERPAPI_KEY = os.environ.get("SERPAPI_KEY")
+
+MONTHS = ["Jan","Feb","Mar","Apr","May","Jun",
+          "Jul","Aug","Sep","Oct","Nov","Dec"]
 
 def to_12_months(lst):
-    """Safely convert any length list to exactly 12 values."""
     if not lst:
         return [0] * 12
     if len(lst) >= 12:
         chunk = len(lst) // 12
         result = []
         for i in range(12):
-            slice_ = lst[i * chunk: (i + 1) * chunk]
+            slice_ = lst[i * chunk:(i + 1) * chunk]
             result.append(int(sum(slice_) / len(slice_)) if slice_ else 0)
         return result
-    # pad with zeros if shorter than 12
     return lst + [0] * (12 - len(lst))
 
-@app.get("/debug")
-def debug(keyword: str):
-    """Raw pytrends output — for debugging only."""
-    try:
-        pt = TrendReq(hl="en-US", tz=360, timeout=(10, 25), retries=2, backoff_factor=0.5)
-        time.sleep(2)
-        pt.build_payload([keyword], timeframe="today 12-m")
-        iot = pt.interest_over_time()
-        return {
-            "columns": list(iot.columns) if not iot.empty else [],
-            "shape": list(iot.shape) if not iot.empty else [],
-            "sample": iot.head(5).to_dict() if not iot.empty else {},
-            "keyword_in_columns": keyword in iot.columns if not iot.empty else False,
-        }
-    except Exception as e:
-        return {"error": str(e)}
 
 @app.get("/trends")
-def get_trends(keyword: str):
+async def get_trends(keyword: str):
+    if not SERPAPI_KEY:
+        raise HTTPException(status_code=500, detail="SERPAPI_KEY not set")
+
     cached = get_cached(keyword)
     if cached:
         return cached
 
     try:
-        pt = TrendReq(
-            hl="en-US",
-            tz=360,
-            timeout=(10, 25),
-            retries=3,
-            backoff_factor=0.5,
-        )
-        time.sleep(random.uniform(1.5, 3.0))
+        async with httpx.AsyncClient(timeout=30) as client:
 
-        # --- Interest over time ---
-        pt.build_payload([keyword], timeframe="today 12-m")
-        iot = pt.interest_over_time()
-        time.sleep(random.uniform(1.0, 2.0))
+            # 1. Interest over time
+            iot_resp = await client.get("https://serpapi.com/search", params={
+                "engine":   "google_trends",
+                "q":        keyword,
+                "data_type": "TIMESERIES",
+                "date":     "today 12-m",
+                "api_key":  SERPAPI_KEY,
+            })
+            iot_data = iot_resp.json()
+            timeline = iot_data.get("interest_over_time", {}).get("timeline_data", [])
+            raw_interest = [
+                item["values"][0]["extracted_value"]
+                for item in timeline
+                if item.get("values")
+            ]
+            interest = to_12_months(raw_interest)
 
-        if not iot.empty and keyword in iot.columns:
-            raw = iot[keyword].tolist()
-        else:
-            raw = []
+            # 2. Related queries
+            rq_resp = await client.get("https://serpapi.com/search", params={
+                "engine":   "google_trends",
+                "q":        keyword,
+                "data_type": "RELATED_QUERIES",
+                "date":     "today 12-m",
+                "api_key":  SERPAPI_KEY,
+            })
+            rq_data = rq_resp.json()
+            related  = rq_data.get("related_queries", {})
+            rising   = [r["query"] for r in related.get("rising",  [])[:4]]
+            top      = [r["query"] for r in related.get("top",     [])[:6]]
 
-        interest = to_12_months(raw)
+            # 3. Related topics
+            rt_resp = await client.get("https://serpapi.com/search", params={
+                "engine":   "google_trends",
+                "q":        keyword,
+                "data_type": "RELATED_TOPICS",
+                "date":     "today 12-m",
+                "api_key":  SERPAPI_KEY,
+            })
+            rt_data  = rt_resp.json()
+            topics   = rt_data.get("related_topics", {})
+            trending = [t["topic"]["title"] for t in topics.get("rising", [])[:4]]
 
-        # --- Related queries ---
-        pt.build_payload([keyword], timeframe="today 12-m")
-        related = pt.related_queries()
-        time.sleep(random.uniform(1.0, 2.0))
+        # Peak month & YoY
+        peak_idx   = interest.index(max(interest)) if any(interest) else 0
+        peak_month = MONTHS[min(peak_idx, 11)]
 
-        kw_data = related.get(keyword, {}) or {}
-
-        def extract_queries(df):
-            try:
-                if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-                    return []
-                return df["query"].dropna().tolist()
-            except:
-                return []
-
-        rising = extract_queries(kw_data.get("rising"))
-        top    = extract_queries(kw_data.get("top"))
-
-        # --- Related topics ---
-        pt.build_payload([keyword], timeframe="today 12-m")
-        topics = pt.related_topics()
-        time.sleep(random.uniform(1.0, 2.0))
-
-        t_data = topics.get(keyword, {}) or {}
-        top_topics = []
-        try:
-            if isinstance(t_data.get("top"), pd.DataFrame) and not t_data["top"].empty:
-                top_topics = t_data["top"]["topic_title"].dropna().tolist()[:6]
-        except:
-            top_topics = []
-
-        # --- Peak month ---
-        months = ["Jan","Feb","Mar","Apr","May","Jun",
-                  "Jul","Aug","Sep","Oct","Nov","Dec"]
-        peak_idx = interest.index(max(interest)) if any(interest) else 0
-        peak_month = months[min(peak_idx, 11)]
-
-        # --- YoY trend ---
         try:
             first_half  = sum(interest[:6]) / 6 or 1
             second_half = sum(interest[6:]) / 6
-            yoy = round(((second_half - first_half) / first_half) * 100)
-            trend_str = f"+{yoy}% vs last year" if yoy >= 0 else f"{yoy}% vs last year"
+            yoy         = round(((second_half - first_half) / first_half) * 100)
+            trend_str   = f"+{yoy}% vs last year" if yoy >= 0 else f"{yoy}% vs last year"
         except:
             trend_str = "N/A"
 
@@ -141,9 +117,9 @@ def get_trends(keyword: str):
             "searchVolume": "Live data (relative scale 0–100)",
             "trend":        trend_str,
             "peakMonth":    peak_month,
-            "adjacent":     top[:6],
-            "rising":       rising[:4],
-            "trendingNow":  top[:4],
+            "adjacent":     top,
+            "rising":       rising,
+            "trendingNow":  trending,
         }
 
         set_cached(keyword, result)
