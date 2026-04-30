@@ -45,6 +45,23 @@ def to_12_months(lst):
     # pad with zeros if shorter than 12
     return lst + [0] * (12 - len(lst))
 
+@app.get("/debug")
+def debug(keyword: str):
+    """Raw pytrends output — for debugging only."""
+    try:
+        pt = TrendReq(hl="en-US", tz=360, timeout=(10, 25), retries=2, backoff_factor=0.5)
+        time.sleep(2)
+        pt.build_payload([keyword], timeframe="today 12-m")
+        iot = pt.interest_over_time()
+        return {
+            "columns": list(iot.columns) if not iot.empty else [],
+            "shape": list(iot.shape) if not iot.empty else [],
+            "sample": iot.head(5).to_dict() if not iot.empty else {},
+            "keyword_in_columns": keyword in iot.columns if not iot.empty else False,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
 @app.get("/trends")
 def get_trends(keyword: str):
     cached = get_cached(keyword)
